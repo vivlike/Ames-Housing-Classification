@@ -1,0 +1,233 @@
+---
+title: "AmesHousingGBM"
+author: "Vivek Singh"
+date: "March 7, 2018"
+output:
+  
+  html_document: 
+    keep_md: yes
+  word_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## R Markdown
+
+```{r}
+
+#loading the packages
+
+library(tidyr)
+library(dplyr)
+library(caret)
+library(VIM)
+library(xgboost)
+
+```
+
+##Importing the dataset
+
+```{r}
+
+ames.df <- read.csv("D:\\Dataset\\ames7070.csv", stringsAsFactors = TRUE)
+str(ames.df)
+
+```
+
+## Using 17 variables from the dataset with Bonus as the response variable
+
+```{r}
+
+keep <- c("Gr_Liv_Area", "fullbath_2plus", "Age_at_Sale", "High_Exterior_Qual", 
+          "Overall_Quality", "High_Kitchen_Quality", "TwoPlusCar_Garage", "Total_Bsmt_SF", 
+          "Open_Porch_SF", "Lot_Area", "fireplace_1plus", "Vinyl_Siding", "Overall_Condition", 
+          "Irreg_Lot_Shape", "Bedroom_AbvGr", "Remodel", "Bonus")
+
+ames.df <- ames.df[keep]
+str(ames.df)
+
+```
+
+##All variables have been imported as numeric. Converting categorical variables to factors.
+
+```{r}
+
+cat.var <- c(2,4:7,11:16)
+ames.df[,cat.var] <- lapply(ames.df[,cat.var], factor)
+summary(ames.df)
+
+```
+
+## Looking at the initial distribution of Bonus = 0 or 1. The Naive rule is as below.
+
+```{r}
+ames.df %>% group_by(Bonus) %>% summarise(Percent = round(n()/nrow(ames.df),2))
+```
+
+## Checking if any variable has missing values
+```{r}
+
+sapply(ames.df, function(x) sum(is.na(x)))
+aggr(ames.df)
+
+```
+
+#Splitting the dataset into train and test with 70-30 split
+
+```{r}
+
+set.seed(123)
+train <- sample(nrow(ames.df), size = floor(0.7*nrow(ames.df)), replace = FALSE)
+ames.train <- ames.df[train,]
+ames.test <- ames.df[-train,]
+
+#storing the responnse variable
+label.train <- as.numeric(ames.train$Bonus)
+label.test <- as.numeric(ames.test$Bonus)
+
+```
+
+#Creating XGBoost Model
+##Preprocessing
+###1) XGBoost requires all the values to be numeric. Here we already have all the variables as numeric.
+###2) Performing one hot encoding for categorical variables. 
+###3) Create dense or sparse matrix
+
+```{r}
+#one hot encoding
+train.encode <- model.matrix(Bonus~.-1, data = ames.train)
+test.encode <- model.matrix(Bonus~.-1, data = ames.test)
+
+#converting data into dense matrix using xgb.DMatrix
+train.mat <- xgb.DMatrix(train.encode, label = label.train)
+test.mat <- xgb.DMatrix(test.encode, label = label.test)
+
+```
+##Tuning the parameters
+
+```{r}
+set.seed(123)
+param1 <- list(objective = "binary:logistic", eta=0.1, max_depth = 6, 
+               colsample_bytree = 1, min_child_weight = 1)
+
+#using cross validation to select the best parameters for the model
+
+xgbcv1 <- xgb.cv(params= param1, data = train.mat, nrounds = 500, 
+                nthread = 2, nfold = 10, metrics = "error", print_every_n = 5)
+
+
+#Calculating minimum train error
+
+minerror.train <- min(xgbcv1$evaluation_log$train_error_mean)
+minerror.train
+
+#checking the iteration value for minimum train error. 
+#which(xgbcv1$evaluation_log$train_error_mean %in% minerror.train)
+
+#checking the minimum test error
+minerror.test1 <- min(xgbcv1$evaluation_log$test_error_mean)
+minerror.test1
+
+#checking the iteration value for minimum test error. 
+minerror.index.tes1 <- which(xgbcv1$evaluation_log$test_error_mean == minerror.test1)
+
+plot(x = xgbcv1$evaluation_log$iter, y = xgbcv1$evaluation_log$train_error_mean, xlab = "Iteration", ylab = "Mean Error")  
+
+
+```
+
+##Above code can be used by changing the hyper parameters and checking the lowest error for the set of parameters manually.  
+
+## Tuning multiple hyper parameters uisng the loop below.
+
+```{r }
+
+#finding the parameters by performing 100 iterations
+
+best_param = list()
+best_seednumber = 123
+best_minerror = Inf
+best_minerror_index = 0
+
+for (iter in 1:100) {
+    param2 <- list(objective = "binary:logistic",
+          eval_metric = "error",
+          max_depth = sample(6:10, 1),
+          eta = runif(1, .01, 1),
+          gamma = runif(1, 0.0, 0.2), 
+          subsample = runif(1, .6, .9),
+          colsample_bytree = runif(1, .5, .8), 
+          min_child_weight = sample(1:40, 1),
+          max_delta_step = sample(1:10, 1)
+          )
+    cv.nround = 1000
+    cv.nfold = 10 
+    seed.number = sample.int(10000, 1)[[1]]
+    set.seed(seed.number)
+    xgb.cv2 <- xgb.cv(data=train.mat, params = param2, nthread=6, 
+                    nfold=cv.nfold, nrounds=cv.nround,
+                    early.stop.round=50, maximize=TRUE,
+                    print_every_n = 100)
+
+    minerror.test2 = min(xgb.cv2$evaluation_log$test_error_mean)
+    minerror.test2.index =  which(xgb.cv2$evaluation_log$test_error_mean == minerror.test2)
+
+    if (minerror.test2 < best_minerror) {
+        best_minerror = minerror.test2
+        best_minerror_index = minerror.test2.index
+        best_seednumber = seed.number
+        best_param = param2
+    }
+}
+
+nround = best_minerror_index
+set.seed(best_seednumber)
+nround
+best_seednumber
+best_param
+
+```
+
+# Creating XGBoost model
+```{r}
+
+xgb.model <- xgb.train(data=train.mat, params=best_param, nrounds=nround, nthread=6)
+
+```
+
+# Using the model on test set
+
+```{r}
+
+xgb.pred <- predict(xgb.model, test.mat)
+
+```
+
+###XGBoost gives the posterior probabilities for the test dataset. Calculating the outcome based on cutoff 0.5
+###Further computing the confusion matrix and mesuring the accuracy level
+
+```{r}
+xgb.pred <- ifelse(xgb.pred > 0.5, 1,0)
+conf.matrix <- caret:: confusionMatrix(xgb.pred, label.test, positive = "1" )
+conf.matrix
+
+```
+###The overall accuracy of the model is `r conf.matrix[[3]][[1]]`, 
+###Sensitivity is `r conf.matrix[[4]][[1]]`,
+###Specificity is `r conf.matrix[[4]][[2]]`
+
+##Looking at the variable importance
+
+```{r}
+xgb.varimp <- xgb.importance(colnames(train.encode), model = xgb.model)
+xgb.plot.importance(importance_matrix = xgb.varimp, xlab = "Variable Importance Plot")
+
+```
+
+
+
+
